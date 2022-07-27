@@ -32,9 +32,10 @@ Also, Inventa doesn't abstract/hide its Redis client object, you can use its Red
 go get github.com/adalkiran/go-inventa
 ```
 
-## **EXAMPLE**
+## **EXAMPLE PROJECT**
 
-TODO: Coming soon, in progress...
+You can find example projects made using Inventa at [https://github.com/adalkiran/inventa-examples](https://github.com/adalkiran/inventa-examples).
+
 ## **OTHER IMPLEMENTATIONS**
 
 You can find Python implementation of Inventa on [Inventa for Python (py-inventa)](https://github.com/adalkiran/py-inventa).
