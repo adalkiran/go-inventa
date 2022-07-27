@@ -26,7 +26,7 @@ import (
 	"github.com/go-redis/redis/v9"
 )
 
-type RPCCommandFn func(req *RPCCallRequest) string
+type RPCCommandFn func(req *RPCCallRequest) []string
 
 type InventaRole byte
 
@@ -45,6 +45,7 @@ type Inventa struct {
 	RPCCommandFnRegistry   map[string]RPCCommandFn
 	OrchestratorDescriptor ServiceDescriptor
 	IsOrchestratorActive   bool
+	IsRegistered           bool
 
 	rpcInternalCommandFnRegistry      map[string]RPCCommandFn
 	firstPacketReceivedServiceChannel bool
@@ -58,11 +59,12 @@ type Inventa struct {
 	OnServiceUnregistering func(serviceDescriptor ServiceDescriptor, isZombie bool) error
 }
 
-func NewInventa(host string, port int, password string, serviceType string, serviceId string, inventaRole InventaRole, rpcCommandFnRegistry map[string]RPCCommandFn) (*Inventa, context.CancelFunc) {
+func NewInventa(host string, port int, password string, serviceType string, serviceId string, inventaRole InventaRole, rpcCommandFnRegistry map[string]RPCCommandFn) *Inventa {
 	client := redis.NewClient(&redis.Options{
-		Addr:     fmt.Sprintf("%s:%d", host, port),
-		Password: password,
-		DB:       0, // use default DB
+		Addr:        fmt.Sprintf("%s:%d", host, port),
+		Password:    password,
+		DB:          0, // use default DB
+		DialTimeout: 10 * time.Second,
 	})
 
 	result := &Inventa{
@@ -86,31 +88,43 @@ func NewInventa(host string, port int, password string, serviceType string, serv
 		"register":           result.rpcInternalCommandRegister,
 		"orchestrator-alive": result.rpcInternalCommandOrchestratorAlive,
 	}
+	return result
+}
 
-	for i := 1; i <= 5; i++ {
-		_, err := result.Client.Ping(result.Ctx).Result()
+func (r *Inventa) Start() (context.CancelFunc, error) {
+	successPong := false
+	for i := 1; i <= 10; i++ {
+		_, err := r.Client.Ping(r.Ctx).Result()
 		if err == nil {
+			successPong = true
 			break
 		}
 		time.Sleep(1 * time.Second)
 	}
 
+	if !successPong {
+		return nil, fmt.Errorf("cannot connect to redis: %s", r.Client.Options().Addr)
+	}
+
 	subCtx, cancelFunc := context.WithCancel(context.Background())
 
-	go result.subscribeInternal(result.SelfDescriptor.GetPubSubChannelName(), result.rpcRawChannel, subCtx)
-	go result.run(subCtx)
+	go r.subscribeInternal(r.SelfDescriptor.GetPubSubChannelName(), r.rpcRawChannel, subCtx)
+	go r.run(subCtx)
 
-	for result.firstPacketReceivedServiceChannel {
+	for r.firstPacketReceivedServiceChannel {
 		select {
 		case <-time.After(3 * time.Second):
 			break
 		}
 	}
-	result.setSelfActive()
+	r.setSelfActive()
 
 	time.Sleep(100 * time.Millisecond)
 
-	return result, cancelFunc
+	if r.InventaRole == InventaRoleOrchestrator {
+		r.DiscoverServices()
+	}
+	return cancelFunc, nil
 }
 
 func (r *Inventa) DiscoverServices() {
@@ -125,7 +139,7 @@ func (r *Inventa) DiscoverServices() {
 		if r.SelfDescriptor.Encode() == activeServiceDescriptor.Encode() {
 			continue
 		}
-		go r.CallSync(activeServiceDescriptor.Encode(), "orchestrator-alive", r.SelfDescriptor.Encode(), 3*time.Second)
+		go r.CallSync(activeServiceDescriptor.Encode(), "orchestrator-alive", []string{r.SelfDescriptor.Encode()}, 3*time.Second)
 		if r.OnServiceRegistering(activeServiceDescriptor) == nil {
 			r.registeredServices[activeServiceDescriptor] = true
 		}
@@ -185,7 +199,7 @@ func (r *Inventa) run(subCtx context.Context) {
 			if !ok {
 				rpcCommandFn, ok = r.RPCCommandFnRegistry[req.Method]
 			}
-			var cmdResult string
+			var cmdResult []string
 			if !ok {
 				fmt.Printf("Unknown command type: %s\n", req.Method)
 				cmdResult = req.ErrorResponse(fmt.Errorf("unknown command type: %s", req.Method))
@@ -202,24 +216,23 @@ func (r *Inventa) run(subCtx context.Context) {
 	}
 }
 
-func (r *Inventa) CallSync(serviceChannel string, method string, args string, timeout time.Duration) (string, error) {
+func (r *Inventa) CallSync(serviceChannel string, method string, args []string, timeout time.Duration) ([]string, error) {
 	req := r.newRPCCallRequest(method, args)
 	r.Client.Publish(r.Ctx, "ch:"+serviceChannel, req.Encode())
 	for {
 		select {
 		case resp := <-r.rpcResponseChannel:
 			if resp.CallId == req.CallId {
-				dataParts := strings.Split(resp.Data, "|")
-				if dataParts[0] == "error" {
-					if len(dataParts) > 1 {
-						return "", fmt.Errorf(dataParts[1])
+				if resp.Data[0] == "error" {
+					if len(resp.Data) > 1 {
+						return nil, fmt.Errorf(resp.Data[1])
 					}
-					return "", fmt.Errorf("undescribed error")
+					return nil, fmt.Errorf("undescribed error")
 				}
 				return resp.Data, nil
 			}
 		case <-time.After(timeout):
-			return "", fmt.Errorf("sync call of \"%s\" on \"%s\" timed out for %v", method, serviceChannel, timeout)
+			return nil, fmt.Errorf("sync call of \"%s\" on \"%s\" timed out for %v", method, serviceChannel, timeout)
 		}
 	}
 }
@@ -244,6 +257,9 @@ func (r *Inventa) GetAllActiveServices() ([]ServiceDescriptor, error) {
 }
 
 func (r *Inventa) setSelfActive() {
+	if r.InventaRole != InventaRoleOrchestrator && !r.IsRegistered {
+		return
+	}
 	err := r.Client.SetEx(r.Ctx, r.SelfDescriptor.Encode(), 1, 5*time.Second).Err()
 	if err != nil {
 		fmt.Printf("cannot set service status on redis\n")
@@ -296,13 +312,14 @@ func (r *Inventa) TryRegisterToOrchestrator(orchestratorFullId string, tryCount 
 	}
 	for i := 1; i <= tryCount; i++ {
 		fmt.Printf("Trying to register to %s...\n", orchestratorFullId)
-		_, err := r.CallSync(orchestratorFullId, "register", r.SelfDescriptor.Encode(), timeout)
+		_, err := r.CallSync(orchestratorFullId, "register", []string{r.SelfDescriptor.Encode()}, timeout)
 		if err != nil {
 			lastErr = err
 			fmt.Printf("Error while registering: %s. Remaining try count: %d\n", err, tryCount-i)
 			continue
 		}
 		r.OrchestratorDescriptor = orchestratorDescriptor
+		r.IsRegistered = true
 		r.IsOrchestratorActive = true
 		r.setSelfActive()
 		return nil
@@ -310,15 +327,15 @@ func (r *Inventa) TryRegisterToOrchestrator(orchestratorFullId string, tryCount 
 	return lastErr
 }
 
-func (r *Inventa) rpcInternalCommandRegister(req *RPCCallRequest) string {
+func (r *Inventa) rpcInternalCommandRegister(req *RPCCallRequest) []string {
 	r.Lock()
 	defer r.Unlock()
-	serviceDescriptor, err := ParseServiceFullId(req.Args)
+	serviceDescriptor, err := ParseServiceFullId(req.Args[0])
 	if err != nil {
 		return req.ErrorResponse(err)
 	}
 	if r.SelfDescriptor.Encode() == serviceDescriptor.Encode() {
-		return "ignored-self"
+		return []string{"ignored-self"}
 	}
 	if r.OnServiceRegistering == nil {
 		err := fmt.Errorf("the orchestrator service \"%s\" has not implemented \"OnServiceRegistering\" event function", r.SelfDescriptor.Encode())
@@ -330,23 +347,23 @@ func (r *Inventa) rpcInternalCommandRegister(req *RPCCallRequest) string {
 		return req.ErrorResponse(err)
 	}
 	r.registeredServices[serviceDescriptor] = true
-	return "registered"
+	return []string{"registered"}
 }
 
-func (r *Inventa) rpcInternalCommandOrchestratorAlive(req *RPCCallRequest) string {
+func (r *Inventa) rpcInternalCommandOrchestratorAlive(req *RPCCallRequest) []string {
 	if r.InventaRole != InventaRoleService {
-		return "ignored-not-service"
+		return []string{"ignored-not-service"}
 	}
 	r.Lock()
 	defer r.Unlock()
-	orchestratorDescriptor, err := ParseServiceFullId(req.Args)
+	orchestratorDescriptor, err := ParseServiceFullId(req.Args[0])
 	if err != nil {
 		return req.ErrorResponse(err)
 	}
 	if orchestratorDescriptor.Encode() != r.OrchestratorDescriptor.Encode() {
-		return "ignored-unknown-source"
+		return []string{"ignored-unknown-source"}
 	}
 	r.IsOrchestratorActive = true
 	fmt.Printf("The orchestrator service %s is alive again.\n", r.OrchestratorDescriptor.Encode())
-	return "ok"
+	return []string{"ok"}
 }

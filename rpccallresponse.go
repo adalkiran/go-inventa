@@ -21,10 +21,10 @@ import "strings"
 type RPCCallResponse struct {
 	CallId      string
 	FromService ServiceDescriptor
-	Data        string
+	Data        []string
 }
 
-func (r *Inventa) newRPCCallResponse(req *RPCCallRequest, data string) *RPCCallResponse {
+func (r *Inventa) newRPCCallResponse(req *RPCCallRequest, data []string) *RPCCallResponse {
 	return &RPCCallResponse{
 		CallId:      req.CallId,
 		FromService: r.SelfDescriptor,
@@ -33,13 +33,13 @@ func (r *Inventa) newRPCCallResponse(req *RPCCallRequest, data string) *RPCCallR
 }
 
 func (r *RPCCallResponse) Encode() string {
-	return "resp|" + r.CallId + "|" + r.FromService.Encode() + "|" + r.Data
+	return "resp|" + r.CallId + "|" + r.FromService.Encode() + "|" + encodeContentArray(r.Data)
 }
 
 func (r *RPCCallResponse) Decode(raw string) error {
 	rawParts := strings.Split(raw, "|")
 	r.CallId = rawParts[0]
 	r.FromService, _ = ParseServiceFullId(rawParts[1])
-	r.Data = strings.Join(rawParts[2:], "|")
+	r.Data = decodeContentArray(rawParts[2])
 	return nil
 }

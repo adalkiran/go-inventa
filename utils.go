@@ -18,6 +18,7 @@ package inventa
 
 import (
 	"math/rand"
+	"strings"
 	"time"
 )
 
@@ -25,7 +26,13 @@ func init() {
 	rand.Seed(time.Now().UnixNano())
 }
 
-var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+var (
+	letterRunes            = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+	contentReservedCharMap = map[string]string{
+		"|": "%pipe%",
+		"!": "%exc%",
+	}
+)
 
 func randStringRunes(n int) string {
 	b := make([]rune, n)
@@ -33,4 +40,27 @@ func randStringRunes(n int) string {
 		b[i] = letterRunes[rand.Intn(len(letterRunes))]
 	}
 	return string(b)
+}
+
+func encodeContentArray(arr []string) string {
+	for i := range arr {
+		s := arr[i]
+		for key, val := range contentReservedCharMap {
+			s = strings.ReplaceAll(s, key, val)
+		}
+		arr[i] = s
+	}
+	return strings.Join(arr, "!")
+}
+
+func decodeContentArray(s string) []string {
+	arr := strings.Split(s, "!")
+	for i := range arr {
+		s := arr[i]
+		for key, val := range contentReservedCharMap {
+			s = strings.ReplaceAll(s, val, key)
+		}
+		arr[i] = s
+	}
+	return arr
 }

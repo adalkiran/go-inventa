@@ -27,10 +27,10 @@ type RPCCallRequest struct {
 	CallId      string
 	FromService ServiceDescriptor
 	Method      string
-	Args        string
+	Args        []string
 }
 
-func (r *Inventa) newRPCCallRequest(method string, args string) *RPCCallRequest {
+func (r *Inventa) newRPCCallRequest(method string, args []string) *RPCCallRequest {
 	return &RPCCallRequest{
 		CallId:      randStringRunes(5) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10),
 		FromService: r.SelfDescriptor,
@@ -40,7 +40,7 @@ func (r *Inventa) newRPCCallRequest(method string, args string) *RPCCallRequest 
 }
 
 func (r *RPCCallRequest) Encode() string {
-	return "req|" + r.CallId + "|" + r.FromService.Encode() + "|" + r.Method + "|" + r.Args
+	return "req|" + r.CallId + "|" + r.FromService.Encode() + "|" + r.Method + "|" + encodeContentArray(r.Args)
 }
 
 func (r *RPCCallRequest) Decode(raw string) error {
@@ -48,10 +48,10 @@ func (r *RPCCallRequest) Decode(raw string) error {
 	r.CallId = rawParts[0]
 	r.FromService, _ = ParseServiceFullId(rawParts[1])
 	r.Method = rawParts[2]
-	r.Args = strings.Join(rawParts[3:], "|")
+	r.Args = decodeContentArray(rawParts[3])
 	return nil
 }
 
-func (r *RPCCallRequest) ErrorResponse(err error) string {
-	return fmt.Sprintf("error|%s", err)
+func (r *RPCCallRequest) ErrorResponse(err error) []string {
+	return []string{"error", fmt.Sprintf("%s", err)}
 }
