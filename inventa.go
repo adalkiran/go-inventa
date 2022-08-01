@@ -93,17 +93,19 @@ func NewInventa(host string, port int, password string, serviceType string, serv
 
 func (r *Inventa) Start() (context.CancelFunc, error) {
 	successPong := false
+	lastError := nil
 	for i := 1; i <= 10; i++ {
 		_, err := r.Client.Ping(r.Ctx).Result()
 		if err == nil {
 			successPong = true
 			break
 		}
+		lastError = err
 		time.Sleep(1 * time.Second)
 	}
 
 	if !successPong {
-		return nil, fmt.Errorf("cannot connect to redis: %s", r.Client.Options().Addr)
+		return nil, fmt.Errorf("cannot connect to redis: %s, error: %s", r.Client.Options().Addr, lastError)
 	}
 
 	subCtx, cancelFunc := context.WithCancel(context.Background())
