@@ -93,7 +93,7 @@ func NewInventa(host string, port int, password string, serviceType string, serv
 
 func (r *Inventa) Start() (context.CancelFunc, error) {
 	successPong := false
-	lastError := nil
+	var lastError error
 	for i := 1; i <= 10; i++ {
 		_, err := r.Client.Ping(r.Ctx).Result()
 		if err == nil {
