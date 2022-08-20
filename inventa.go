@@ -53,23 +53,17 @@ type Inventa struct {
 	rpcRequestChannel                 chan *RPCCallRequest
 	rpcResponseChannel                chan *RPCCallResponse
 
-	registeredServices map[ServiceDescriptor]bool
+	registeredServices        map[ServiceDescriptor]bool
+	lastOnConnectTime         time.Time
+	isOnConnectRoutineRunning bool
 
 	OnServiceRegistering   func(serviceDescriptor ServiceDescriptor) error
 	OnServiceUnregistering func(serviceDescriptor ServiceDescriptor, isZombie bool) error
 }
 
 func NewInventa(host string, port int, password string, serviceType string, serviceId string, inventaRole InventaRole, rpcCommandFnRegistry map[string]RPCCommandFn) *Inventa {
-	client := redis.NewClient(&redis.Options{
-		Addr:        fmt.Sprintf("%s:%d", host, port),
-		Password:    password,
-		DB:          0, // use default DB
-		DialTimeout: 10 * time.Second,
-	})
-
 	result := &Inventa{
-		Ctx:    context.Background(),
-		Client: client,
+		Ctx: context.Background(),
 		SelfDescriptor: ServiceDescriptor{
 			ServiceType: serviceType,
 			ServiceId:   serviceId,
@@ -83,6 +77,38 @@ func NewInventa(host string, port int, password string, serviceType string, serv
 
 		registeredServices: map[ServiceDescriptor]bool{},
 	}
+	result.Client = redis.NewClient(&redis.Options{
+		Addr:        fmt.Sprintf("%s:%d", host, port),
+		Password:    password,
+		DB:          0, // use default DB
+		DialTimeout: 10 * time.Second,
+		OnConnect: func(ctx context.Context, cn *redis.Conn) error {
+			if !result.firstPacketReceivedServiceChannel || result.isOnConnectRoutineRunning {
+				result.lastOnConnectTime = time.Now()
+				return nil
+			}
+			now := time.Now()
+			if now.Before(result.lastOnConnectTime.Add(200 * time.Millisecond)) {
+				return nil
+			}
+			result.lastOnConnectTime = now
+			go func() {
+				if result.isOnConnectRoutineRunning {
+					return
+				}
+				result.isOnConnectRoutineRunning = true
+				defer func() { result.isOnConnectRoutineRunning = false }()
+				time.Sleep(100 * time.Millisecond)
+				result.setSelfActive()
+				if result.InventaRole == InventaRoleOrchestrator {
+					time.Sleep(1 * time.Second)
+					result.DiscoverServices()
+					result.checkRegisteredServices()
+				}
+			}()
+			return nil
+		},
+	})
 
 	result.rpcInternalCommandFnRegistry = map[string]RPCCommandFn{
 		"register":           result.rpcInternalCommandRegister,
@@ -113,9 +139,9 @@ func (r *Inventa) Start() (context.CancelFunc, error) {
 	go r.subscribeInternal(r.SelfDescriptor.GetPubSubChannelName(), r.rpcRawChannel, subCtx)
 	go r.run(subCtx)
 
-	for r.firstPacketReceivedServiceChannel {
+	for !r.firstPacketReceivedServiceChannel {
 		select {
-		case <-time.After(3 * time.Second):
+		case <-time.After(10 * time.Millisecond):
 			break
 		}
 	}
@@ -136,6 +162,7 @@ func (r *Inventa) DiscoverServices() {
 	activeServiceDescriptors, err := r.GetAllActiveServices()
 	if err != nil {
 		fmt.Printf("Error while processing already registered services on redis: %s\n", err)
+		return
 	}
 	for _, activeServiceDescriptor := range activeServiceDescriptors {
 		if r.SelfDescriptor.Encode() == activeServiceDescriptor.Encode() {
